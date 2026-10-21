@@ -75,8 +75,23 @@ pub fn start() {
                         app.session.set_document(doc);
                     }
                     let prefs = crate::prefs::PrefsSync::new(stored);
+                    // OfficeHub: open the document the portal asked for (it arrives through the inbox).
+                    let portal = crate::portal::source();
+                    if let Some((src, name)) = portal.clone() {
+                        let inbox = inbox.clone();
+                        let ctx = cc.egui_ctx.clone();
+                        wasm_bindgen_futures::spawn_local(async move {
+                            match crate::portal::fetch(&src, "GET", None).await {
+                                Ok(bytes) => {
+                                    inbox.lock().unwrap_or_else(|e| e.into_inner()).push((name, bytes));
+                                    ctx.request_repaint();
+                                }
+                                Err(e) => log::error!("couldn't open the document from OfficeHub: {e}"),
+                            }
+                        });
+                    }
                     // No document to show: start on File › Home, as the desktop app does (#766).
-                    if !sample {
+                    if !sample && portal.is_none() {
                         app.start_screen();
                     }
                     Ok(Box::new(WebShell { app, inbox, messages, prefs }))
@@ -246,7 +261,10 @@ fn services(inbox: Inbox, ctx: egui::Context, dirty: Rc<Cell<bool>>, saves: Asyn
         // Exports ask for a name; the browser decides where the download goes.
         pick_save: Some(Box::new(|name: &str| Some(name.to_string()))),
         async_saves: Some(saves.clone()),
-        download: Some(Box::new(move |path: &str, bytes: &[u8]| download(&saves, &save_ctx, path, bytes))),
+        download: Some(Box::new(move |path: &str, bytes: &[u8]| match crate::portal::save_target(path) {
+            Some(url) => save_to_portal(&saves, &save_ctx, url, bytes),
+            None => download(&saves, &save_ctx, path, bytes),
+        })),
         print: Some(Box::new(print_pdf)),
         inbox: Some(inbox),
         on_dirty: Some(Box::new(move |d| dirty.set(d))),
@@ -386,6 +404,27 @@ fn guard_unload(dirty: Rc<Cell<bool>>, saves: AsyncSaves) -> Result<(), String> 
     window.add_event_listener_with_callback("beforeunload", on_unload.as_ref().unchecked_ref()).map_err(|e| format!("{e:?}"))?;
     // The listener lives as long as the page.
     on_unload.forget();
+    Ok(())
+}
+
+/// OfficeHub: send the document back to the portal, which keeps it as the file's next version. The
+/// document counts as saved once the portal has it (or the reason is shown).
+fn save_to_portal(saves: &AsyncSaves, ctx: &egui::Context, url: String, bytes: &[u8]) -> Result<(), String> {
+    let ticket = saves.start();
+    let saves = saves.clone();
+    let ctx = ctx.clone();
+    let bytes = bytes.to_vec();
+    wasm_bindgen_futures::spawn_local(async move {
+        let outcome = match crate::portal::fetch(&url, "PUT", Some(&bytes)).await {
+            Ok(_) => SaveOutcome::Saved,
+            Err(e) => {
+                log::error!("{e}");
+                SaveOutcome::Failed(e)
+            }
+        };
+        saves.finish(ticket, outcome);
+        ctx.request_repaint();
+    });
     Ok(())
 }
 
