@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 wordcraft-geom = { workspace = true }
 wordcraft-doc = { workspace = true }
+wordcraft-collab = { workspace = true }
 wordcraft-fonts = { workspace = true }
 wordcraft-layout = { workspace = true }
 wordcraft-render = { workspace = true }

@@ -1,0 +1,18 @@
+[package]
+name = "wordcraft-collab"
+description = "WordCraft live co-editing: the document as a Yjs document (yrs), diffs of local edits and merges of others'"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+wordcraft-doc = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+yrs = { version = "0.28", default-features = false }
+
+[lints]
+workspace = true

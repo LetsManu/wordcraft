@@ -352,6 +352,8 @@ impl EditSnapshot {
 /// An editing session.
 pub struct Session {
     pub doc: Document,
+    /// Live co-editing (see [`crate::collab`]); inactive unless a host connects the document.
+    pub(crate) shared: crate::collab::Shared,
     pub sel: Selection,
     pub view: ViewState,
     /// Formatting picked with a collapsed caret, applied to the next typed text.
@@ -630,6 +632,7 @@ impl Session {
         let bib_style = doc_bib_style(&doc);
         Session {
             doc,
+            shared: Default::default(),
             sel: Selection::caret(start),
             view: ViewState::default(),
             pending: None,
@@ -932,6 +935,8 @@ impl Session {
         if label == "Typing" && self.typing_open {
             return;
         }
+        // In a shared session the step before this one ends here.
+        self.collab_end_step();
         self.typing_open = label == "Typing";
         self.history.push(Arc::new(Undo {
             label: label.to_string(),
@@ -992,10 +997,10 @@ impl Session {
         self.typing_open = false;
     }
     pub fn can_undo(&self) -> bool {
-        !self.history.is_empty()
+        self.collab_can_undo().unwrap_or(!self.history.is_empty())
     }
     pub fn can_redo(&self) -> bool {
-        !self.redo.is_empty()
+        self.collab_can_redo().unwrap_or(!self.redo.is_empty())
     }
     pub fn undo_label(&self) -> Option<&str> {
         self.history.last().map(|u| u.label.as_str())
@@ -1031,6 +1036,9 @@ impl Session {
     }
     pub fn undo(&mut self) -> bool {
         self.typing_open = false;
+        if let Some(done) = self.collab_undo(false) {
+            return done;
+        }
         // Undoing the automatic capitalisation's own step makes its word an exception; any
         // other Undo forgets the capital.
         let steps = self.history.len() as u64 + self.undo_evicted;
@@ -1056,6 +1064,9 @@ impl Session {
     }
     pub fn redo(&mut self) -> bool {
         self.typing_open = false;
+        if let Some(done) = self.collab_undo(true) {
+            return done;
+        }
         let Some(u) = self.redo.pop().map(Arc::unwrap_or_clone) else { return false };
         let cur = Undo {
             label: u.label.clone(),
@@ -1104,6 +1115,8 @@ impl Session {
     /// Replace the document (open/new).
     pub fn set_document(&mut self, doc: Document) {
         self.autocap = None;
+        // Another document is not the shared one.
+        self.shared = Default::default();
         self.document_id = self.document_id.wrapping_add(1);
         self.bib_style = doc_bib_style(&doc);
         self.doc = doc;
@@ -1146,6 +1159,8 @@ impl Session {
     pub fn edit_snapshot(&self) -> EditSnapshot {
         let Session {
             doc,
+            // The live session is host wiring; the shared document follows the restored one.
+            shared: _,
             sel,
             view: _,
             pending: _,

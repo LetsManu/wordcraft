@@ -14,6 +14,7 @@ repository = "https://github.com/storytold/wordcraft"
 # internal
 wordcraft-geom = { path = "crates/geom" }
 wordcraft-doc = { path = "crates/doc" }
+wordcraft-collab = { path = "crates/collab" }
 wordcraft-fonts = { path = "crates/fonts" }
 wordcraft-layout = { path = "crates/layout" }
 wordcraft-docx = { path = "crates/docx" }
