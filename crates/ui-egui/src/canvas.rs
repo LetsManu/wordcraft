@@ -1511,6 +1511,22 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 }
             }
         }
+        // Live co-editing: the others' carets in their colour, with their name.
+        for peer in &app.peers {
+            let Some(pos) = &peer.caret else { continue };
+            let Some(c) = layout.caret_on(pos, app.session.page_hint) else { continue };
+            let Some(pr) = rects.get(c.page) else { continue };
+            let scale = layout.pages.get(c.page).map_or(geo.scale, |page| page_screen_scale(*pr, page, geo.scale));
+            let x = (pr.min.x + c.x * scale).round() + 0.5;
+            let y0 = pr.min.y + c.top * scale;
+            let y1 = y0 + c.height * scale;
+            let col = peer.color32();
+            painter.line_segment([pos2(x, y0), pos2(x, y1)], Stroke::new(2.0, col));
+            let galley = painter.layout_no_wrap(peer.name.clone(), egui::FontId::proportional(11.0), egui::Color32::WHITE);
+            let tag = Rect::from_min_size(pos2(x - 1.0, y0 - galley.size().y - 4.0), galley.size() + egui::vec2(8.0, 4.0));
+            painter.rect_filled(tag, 3.0, col);
+            painter.galley(tag.min + egui::vec2(4.0, 2.0), galley, egui::Color32::WHITE);
+        }
         if !math_caret
             && let Some(c) = layout.caret_on(&app.session.sel.focus, app.session.page_hint)
             && let Some(pr) = rects.get(c.page)

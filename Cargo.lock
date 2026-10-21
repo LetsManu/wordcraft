@@ -5464,6 +5464,7 @@ dependencies = [
 name = "wordcraft-web"
 version = "0.9.0"
 dependencies = [
+ "base64",
  "eframe",
  "egui",
  "js-sys",

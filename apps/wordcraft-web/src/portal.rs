@@ -73,8 +73,7 @@ pub async fn fetch(url: &str, method: &str, body: Option<&[u8]>) -> Result<Vec<u
     }
     let fetch_fn: js_sys::Function =
         js_sys::Reflect::get(&window, &"fetch".into()).map_err(js)?.dyn_into().map_err(|_| "fetch is not available".to_string())?;
-    let promise: js_sys::Promise =
-        fetch_fn.call2(&window, &url.into(), &init).map_err(js)?.dyn_into().map_err(|_| "not a promise".to_string())?;
+    let promise: js_sys::Promise = fetch_fn.call2(&window, &url.into(), &init).map_err(js)?.dyn_into().map_err(|_| "not a promise".to_string())?;
     let response = wasm_bindgen_futures::JsFuture::from(promise).await.map_err(js)?;
     let status = js_sys::Reflect::get(&response, &"status".into()).ok().and_then(|v| v.as_f64()).unwrap_or(0.0) as u32;
     if !(200..300).contains(&status) {
@@ -86,12 +85,9 @@ pub async fn fetch(url: &str, method: &str, body: Option<&[u8]>) -> Result<Vec<u
             _ => format!("OfficeHub: saving failed (HTTP {status})."),
         });
     }
-    let buffer_fn: js_sys::Function = js_sys::Reflect::get(&response, &"arrayBuffer".into())
-        .map_err(js)?
-        .dyn_into()
-        .map_err(|_| "no arrayBuffer".to_string())?;
-    let buffer_promise: js_sys::Promise =
-        buffer_fn.call0(&response).map_err(js)?.dyn_into().map_err(|_| "not a promise".to_string())?;
+    let buffer_fn: js_sys::Function =
+        js_sys::Reflect::get(&response, &"arrayBuffer".into()).map_err(js)?.dyn_into().map_err(|_| "no arrayBuffer".to_string())?;
+    let buffer_promise: js_sys::Promise = buffer_fn.call0(&response).map_err(js)?.dyn_into().map_err(|_| "not a promise".to_string())?;
     let buffer = wasm_bindgen_futures::JsFuture::from(buffer_promise).await.map_err(js)?;
     Ok(js_sys::Uint8Array::new(&buffer).to_vec())
 }

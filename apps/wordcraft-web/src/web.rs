@@ -94,7 +94,8 @@ pub fn start() {
                     if !sample && portal.is_none() {
                         app.start_screen();
                     }
-                    Ok(Box::new(WebShell { app, inbox, messages, prefs }))
+                    let live = crate::live::Live::from_portal(&app);
+                    Ok(Box::new(WebShell { app, inbox, messages, prefs, live }))
                 }),
             )
             .await;
@@ -118,6 +119,8 @@ struct WebShell {
     inbox: Inbox,
     messages: Rc<RefCell<Vec<String>>>,
     prefs: crate::prefs::PrefsSync,
+    /// OfficeHub: editing together with others (`?collab=`).
+    live: Option<crate::live::Live>,
 }
 
 fn local_storage() -> Option<web_sys::Storage> {
@@ -151,6 +154,9 @@ impl eframe::App for WebShell {
             self.app.status(msg);
         }
         self.app.logic(ctx);
+        if let Some(live) = self.live.as_mut() {
+            live.frame(&mut self.app, ctx);
+        }
         // Store changed preferences straight away: a reload or closed tab runs no exit code (#2132).
         if let Some(json) = self.prefs.changed(&self.app) {
             match local_storage() {

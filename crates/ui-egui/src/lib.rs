@@ -623,6 +623,24 @@ pub struct WordApp {
     no_document: Option<u64>,
     /// Comment and reply text typed but not yet written to the document (#1348).
     pub(crate) comment_drafts: panes::CommentDrafts,
+    /// The other people editing this document live (set by the host each frame); their carets
+    /// show in their colour with their name.
+    pub peers: Vec<RemotePeer>,
+}
+
+/// Someone else in a live co-editing session.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RemotePeer {
+    pub name: String,
+    pub color: [u8; 3],
+    /// Where their caret is (in their copy of the document; close enough to show).
+    pub caret: Option<wordcraft_doc::Pos>,
+}
+
+impl RemotePeer {
+    pub fn color32(&self) -> egui::Color32 {
+        egui::Color32::from_rgb(self.color[0], self.color[1], self.color[2])
+    }
 }
 
 /// The answer to "Do you want to save changes?" (`ui.saveChanges`).
@@ -651,6 +669,7 @@ impl WordApp {
             wordcraft_engine::set_system_locale(&tag);
         }
         WordApp {
+            peers: Vec::new(),
             session,
             ui: UiState::default(),
             services,
