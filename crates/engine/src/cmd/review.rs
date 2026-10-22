@@ -164,8 +164,7 @@ fn reply(s: &mut Session, v: &Value) -> CmdResult {
 
 /// An id no comment has: one past the largest, or the lowest free one once a file used `u32::MAX`.
 fn comment_id(s: &Session) -> Result<u32, CmdError> {
-    let ids = &s.doc.comments;
-    wordcraft_doc::free_id(ids.keys().next_back().copied(), ids.keys().copied(), 0).ok_or_else(|| CmdError::Failed("no free comment id".into()))
+    s.doc.new_id(s.doc.comments.keys().copied(), 0).ok_or_else(|| CmdError::Failed("no free comment id".into()))
 }
 
 /// Comments can't be written or edited in a document protected as read only or for filling in

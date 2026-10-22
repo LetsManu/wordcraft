@@ -10,6 +10,7 @@
 //! | `meta` (map) | a `Document` field (camelCase) | that field as JSON |
 //! | `stories` (map) | `body`, a part id | the story's text ([`story`]) |
 //! | `parts` (map) | part id | the part without its blocks, as JSON |
+//! | `cells` (map) | cell id | a table cell's text ([`story`]) |
 //! | `comments` (map) | comment id | the comment as JSON |
 //! | `media` (map) | media key | the bytes |
 //!
@@ -44,7 +45,8 @@ pub type Result<T> = std::result::Result<T, CollabError>;
 #[derive(Clone, Debug)]
 pub struct Anchor {
     story: StoryRef,
-    path: wordcraft_doc::Path,
+    /// The table cell whose text holds it (`None`: the story's own paragraphs).
+    cell: Option<String>,
     sticky: StickyIndex,
 }
 
@@ -54,8 +56,11 @@ pub struct Collab {
     meta: MapRef,
     stories: MapRef,
     parts: MapRef,
+    cells: MapRef,
     comments: MapRef,
     media: MapRef,
+    client: u64,
+    next_cell: u64,
     synced: Option<Arc<Document>>,
     seen: HashMap<String, Arc<str>>,
     undo: UndoManager<()>,
@@ -133,15 +138,18 @@ impl Collab {
             init_undo_stack: Vec::new(),
             init_redo_stack: Vec::new(),
         });
-        for name in ["meta", "stories", "parts", "comments", "media"] {
+        for name in ["meta", "stories", "parts", "cells", "comments", "media"] {
             undo.expand_scope(&doc, &doc.get_or_insert_map(name));
         }
         Collab {
             meta: doc.get_or_insert_map("meta"),
             stories: doc.get_or_insert_map("stories"),
             parts: doc.get_or_insert_map("parts"),
+            cells: doc.get_or_insert_map("cells"),
             comments: doc.get_or_insert_map("comments"),
             media: doc.get_or_insert_map("media"),
+            client: client_id & ((1 << 53) - 1),
+            next_cell: 0,
             doc,
             synced: None,
             seen: HashMap::new(),
@@ -238,15 +246,14 @@ impl Collab {
 
     fn write_story(&mut self, txn: &mut TransactionMut, s: StoryRef, old: &Blocks, new: &Blocks) {
         let key = story_key(s);
-        let caret = self.caret.as_ref().filter(|c| c.story == s && c.path.0.len() == 1).and_then(|c| {
-            let i = c.path.last();
-            Some(new.get(..i)?.iter().map(|b| story::block_len(b)).sum::<usize>() + c.off)
-        });
+        let caret = self.caret.clone().filter(|c| c.story == s);
+        let caret = caret.as_ref().map(|c| (c.path.0.as_slice(), c.off));
+        let mut cx = story::Ctx { cells: &self.cells, client: self.client, next: &mut self.next_cell };
         match self.stories.get(txn, &key) {
-            Some(Out::YText(t)) => story::write(txn, &t, old, new, caret),
+            Some(Out::YText(t)) => story::write(txn, &t, old, new, caret, &mut cx, 0),
             _ => {
                 let t: TextRef = self.stories.insert(txn, key.as_str(), TextPrelim::new(""));
-                story::write(txn, &t, &Vec::new(), new, None);
+                story::write(txn, &t, &Vec::new(), new, None, &mut cx, 0);
             }
         }
     }
@@ -364,7 +371,7 @@ impl Collab {
 
         // The stories.
         if let Some(Out::YText(t)) = self.stories.get(&txn, "body") {
-            d.body = story::read(&txn, &t, &base.body);
+            d.body = story::read(&txn, &t, &base.body, &self.cells, 0);
         }
         for (k, v) in self.parts.iter(&txn) {
             let Out::Any(Any::String(s)) = v else { continue };
@@ -372,7 +379,7 @@ impl Collab {
             let Ok(mut part) = serde_json::from_str::<Part>(&s) else { continue };
             let old = base.parts.get(&id).map(|p| p.blocks.clone()).unwrap_or_default();
             if let Some(Out::YText(t)) = self.stories.get(&txn, k) {
-                part.blocks = story::read(&txn, &t, &old);
+                part.blocks = story::read(&txn, &t, &old, &self.cells, 0);
             }
             touched.insert(format!("part:{k}"));
             self.seen.insert(format!("part:{k}"), s);
@@ -398,21 +405,19 @@ impl Collab {
         Ok(d)
     }
 
-    /// Anchors for document positions (only positions in a story's own paragraphs, not inside
-    /// tables, can follow the text; the others get `None` and stay as they are).
+    /// Anchors for document positions, in a story's paragraphs or in table cells (`None`: the
+    /// position cannot follow the text and stays as it is).
     pub fn anchors(&self, d: &Document, positions: &[&Pos]) -> Vec<Option<Anchor>> {
         let txn = self.doc.transact();
         positions
             .iter()
             .map(|p| {
-                if p.path.0.len() != 1 {
-                    return None;
-                }
                 let Some(Out::YText(t)) = self.stories.get(&txn, &story_key(p.story)) else { return None };
                 let blocks = blocks_of(d, p.story)?;
-                let index = blocks.get(..p.path.last())?.iter().map(|b| story::block_len(b)).sum::<usize>() + p.off;
-                let sticky = story::anchor(&txn, &t, u32::try_from(index).ok()?)?;
-                Some(Anchor { story: p.story, path: p.path.clone(), sticky })
+                let (text, blocks, i, cell) = story::locate(&txn, t, blocks, &p.path.0, &self.cells)?;
+                let index = blocks.get(..i)?.iter().map(|b| story::block_len(b)).sum::<usize>() + p.off;
+                let sticky = story::anchor(&txn, &text, u32::try_from(index).ok()?)?;
+                Some(Anchor { story: p.story, cell, sticky })
             })
             .collect()
     }
@@ -425,7 +430,19 @@ impl Collab {
             .map(|a| {
                 let a = a.as_ref()?;
                 let mut index = story::resolve(&txn, &a.sticky)? as usize;
-                let blocks = blocks_of(d, a.story)?;
+                let story_blocks = blocks_of(d, a.story)?;
+                let (prefix, blocks) = match &a.cell {
+                    None => (Vec::new(), story_blocks),
+                    Some(id) => {
+                        let Some(Out::YText(t)) = self.stories.get(&txn, &story_key(a.story)) else { return None };
+                        story::find_cell(&txn, &t, story_blocks, id, &self.cells, 0)?
+                    }
+                };
+                let at = |i: usize, off: usize| {
+                    let mut path = prefix.clone();
+                    path.push(i as u32);
+                    Pos::new(a.story, wordcraft_doc::Path(path), off)
+                };
                 for (i, b) in blocks.iter().enumerate() {
                     let len = story::block_len(b);
                     if index < len {
@@ -433,14 +450,13 @@ impl Collab {
                             wordcraft_doc::Block::Para(p) => (0..=index.min(p.text.len())).rev().find(|o| p.text.is_char_boundary(*o)).unwrap_or(0),
                             wordcraft_doc::Block::Table(_) => 0,
                         };
-                        return Some(Pos::new(a.story, wordcraft_doc::Path::top(i), off));
+                        return Some(at(i, off));
                     }
                     index -= len;
                 }
                 let last = blocks.len().checked_sub(1)?;
                 let off = blocks.get(last)?.as_para().map(|p| p.text.len()).unwrap_or(0);
-                let _ = &a.path;
-                Some(Pos::new(a.story, wordcraft_doc::Path::top(last), off))
+                Some(at(last, off))
             })
             .collect()
     }

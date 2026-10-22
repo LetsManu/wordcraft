@@ -731,6 +731,11 @@ pub struct Document {
     /// The document's own building blocks (its glossary document), in file order.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub glossary: Vec<BuildingBlock>,
+    /// While several people edit the document together: the ids (`start..end`) this person gives
+    /// new parts, comments and images, so two people adding one at the same time never pick the
+    /// same id. Not saved.
+    #[serde(skip)]
+    pub id_range: Option<(u32, u32)>,
 }
 
 impl Default for Document {
@@ -758,6 +763,7 @@ impl Document {
             endnote_separators: NoteSeparators::default(),
             media: BTreeMap::new(),
             passthrough: BTreeMap::new(),
+            id_range: None,
             glossary: Vec::new(),
         }
     }
@@ -1040,6 +1046,33 @@ impl Document {
         true
     }
 
+    /// A free id, `min` or more, among `used` (see [`free_id`]); inside [`Document::id_range`] when
+    /// one is set (`None` once that range is full).
+    pub fn new_id(&self, used: impl Iterator<Item = u32>, min: u32) -> Option<u32> {
+        match self.id_range {
+            None => {
+                let used: Vec<u32> = used.collect();
+                free_id(used.iter().copied().max(), used.into_iter(), min)
+            }
+            Some((start, end)) => {
+                let start = start.max(min);
+                let mut inside: Vec<u32> = used.filter(|i| (start..end).contains(i)).collect();
+                inside.sort_unstable();
+                let next = inside.last().map_or(Some(start), |l| l.checked_add(1)).filter(|i| *i < end);
+                next.or_else(|| {
+                    let mut want = start;
+                    for i in inside {
+                        if i > want {
+                            break;
+                        }
+                        want = i.checked_add(1)?;
+                    }
+                    (want < end).then_some(want)
+                })
+            }
+        }
+    }
+
     /// Allocate a new part id and insert the part. Part ids run out only past `u32::MAX` parts, more
     /// than memory holds; then nothing is added and the id is 0, which [`free_id`] never gives a part.
     pub fn add_part(&mut self, kind: PartKind, blocks: Blocks) -> u32 {
@@ -1048,8 +1081,7 @@ impl Document {
 
     /// [`Document::add_part`], or an error, adding nothing, when every part id is taken.
     pub fn try_add_part(&mut self, kind: PartKind, blocks: Blocks) -> Result<u32> {
-        let id = free_id(self.parts.keys().next_back().copied(), self.parts.keys().copied(), 1)
-            .ok_or_else(|| DocError::Invalid("no free part id".into()))?;
+        let id = self.new_id(self.parts.keys().copied(), 1).ok_or_else(|| DocError::Invalid("no free part id".into()))?;
         let mut part = Part { kind, blocks, body: TextBody::default() };
         if part.blocks.is_empty() {
             part.blocks.push(para_block(Paragraph::new()));
@@ -1334,7 +1366,10 @@ impl Document {
         if let Some((k, _)) = self.media.iter().find(|(_, v)| v.as_slice() == bytes.as_slice()) {
             return k.clone();
         }
-        let n = self.media.len() + 1;
+        let n = match self.id_range {
+            Some((start, _)) => start as usize + self.media.len(),
+            None => self.media.len() + 1,
+        };
         let mut key = format!("image{n}.{ext}");
         let mut i = n;
         while self.media.contains_key(&key) {

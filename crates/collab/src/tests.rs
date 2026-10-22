@@ -159,3 +159,184 @@ fn line_breaks_inside_a_paragraph_survive() {
     assert_eq!(texts(&peers[1].d)[0], "First\nnext line paragraph.");
     assert_eq!(texts(&peers[1].d).len(), 4);
 }
+
+fn table_mut(d: &mut Document) -> &mut wordcraft_doc::table::Table {
+    match d.body.get_mut(2).map(Arc::make_mut) {
+        Some(Block::Table(t)) => t,
+        _ => panic!("no table"),
+    }
+}
+
+fn type_in_cell(d: &mut Document, row: usize, cell: usize, off: usize, s: &str) {
+    let t = table_mut(d);
+    if let Some(Block::Para(p)) = t.rows[row].cells[cell].blocks.get_mut(0).map(Arc::make_mut) {
+        p.text.insert_str(off, s);
+        match p.runs.last_mut() {
+            Some(r) => r.len += s.len(),
+            None => p.runs.push(Run { len: s.len(), props: CharProps::default() }),
+        }
+    }
+}
+
+fn cell_text(d: &Document, row: usize, cell: usize) -> String {
+    let t = d.body[2].as_table().unwrap();
+    t.rows[row].cells[cell].blocks.iter().filter_map(|b| b.as_para()).map(|p| p.text.clone()).collect::<Vec<_>>().join("|")
+}
+
+#[test]
+fn typing_in_the_same_table_cell_keeps_both() {
+    let mut peers = session(2);
+    let a = peers[0].edit(|d| type_in_cell(d, 0, 0, 0, "Hello"));
+    peers[1].receive(&a);
+    let a = peers[0].edit(|d| type_in_cell(d, 0, 0, 0, ">> "));
+    let b = peers[1].edit(|d| type_in_cell(d, 0, 0, 5, " world"));
+    peers[0].receive(&b);
+    peers[1].receive(&a);
+    assert_eq!(peers[0].d.body, peers[1].d.body);
+    assert_eq!(cell_text(&peers[0].d, 0, 0), ">> Hello world");
+}
+
+#[test]
+fn a_new_row_and_typing_in_a_cell_merge() {
+    let mut peers = session(2);
+    let a = peers[0].edit(|d| type_in_cell(d, 0, 0, 0, "Item"));
+    peers[1].receive(&a);
+    let a = peers[0].edit(|d| {
+        let t = table_mut(d);
+        let mut row = t.rows[0].clone();
+        row.cells = vec![wordcraft_doc::table::Cell::empty(), wordcraft_doc::table::Cell::empty()];
+        t.rows.insert(0, row);
+    });
+    let b = peers[1].edit(|d| type_in_cell(d, 1, 1, 0, "Total"));
+    peers[0].receive(&b);
+    peers[1].receive(&a);
+    assert_eq!(peers[0].d.body, peers[1].d.body);
+    assert_eq!(peers[0].d.body[2].as_table().unwrap().rows.len(), 3);
+    assert_eq!(cell_text(&peers[0].d, 2, 1), "Total");
+    assert_eq!(cell_text(&peers[0].d, 0, 1), "");
+}
+
+#[test]
+fn cell_formatting_and_new_tables_arrive() {
+    let mut peers = session(2);
+    let a = peers[0].edit(|d| {
+        type_in_cell(d, 0, 1, 0, "bold");
+        let t = table_mut(d);
+        if let Some(Block::Para(p)) = t.rows[0].cells[1].blocks.get_mut(0).map(Arc::make_mut) {
+            p.runs = vec![Run { len: 4, props: CharProps { bold: Some(true), ..Default::default() } }];
+        }
+        let mut inner = wordcraft_doc::table::Table::new(1, 2, 100.0);
+        if let Some(Block::Para(p)) = inner.rows[0].cells[0].blocks.get_mut(0).map(Arc::make_mut) {
+            p.text = "nested".into();
+            p.runs = vec![Run { len: 6, props: CharProps::default() }];
+        }
+        t.rows[1].cells[0].blocks.insert(0, Arc::new(Block::Table(inner)));
+        d.body.push(Arc::new(Block::Table(wordcraft_doc::table::Table::new(3, 3, 300.0))));
+    });
+    peers[1].receive(&a);
+    assert_eq!(peers[0].d.body, peers[1].d.body);
+    // Typing in the nested table merges too.
+    let a = peers[0].edit(|d| {
+        let t = table_mut(d);
+        if let Some(Block::Table(inner)) = t.rows[1].cells[0].blocks.get_mut(0).map(Arc::make_mut)
+            && let Some(Block::Para(p)) = inner.rows[0].cells[0].blocks.get_mut(0).map(Arc::make_mut)
+        {
+            p.text.push_str(" A");
+            p.runs[0].len += 2;
+        }
+    });
+    let b = peers[1].edit(|d| {
+        let t = table_mut(d);
+        if let Some(Block::Table(inner)) = t.rows[1].cells[0].blocks.get_mut(0).map(Arc::make_mut)
+            && let Some(Block::Para(p)) = inner.rows[0].cells[0].blocks.get_mut(0).map(Arc::make_mut)
+        {
+            p.text.insert_str(0, "B ");
+            p.runs[0].len += 2;
+        }
+    });
+    peers[0].receive(&b);
+    peers[1].receive(&a);
+    assert_eq!(peers[0].d.body, peers[1].d.body);
+    let inner = peers[0].d.body[2].as_table().unwrap().rows[1].cells[0].blocks[0].as_table().unwrap();
+    assert_eq!(inner.rows[0].cells[0].blocks[0].as_para().unwrap().text, "B nested A");
+}
+
+#[test]
+fn undo_in_a_cell_takes_back_only_my_step() {
+    let mut peers = session(2);
+    let a = peers[0].edit(|d| type_in_cell(d, 0, 0, 0, "mine"));
+    peers[0].c.step();
+    let b = peers[1].edit(|d| type_in_cell(d, 0, 0, 0, "theirs "));
+    peers[0].receive(&b);
+    peers[1].receive(&a);
+    let cur = peers[0].d.clone();
+    let (d, u) = peers[0].c.undo(&cur, false).unwrap().unwrap();
+    peers[0].d = d;
+    peers[1].receive(&u);
+    assert_eq!(peers[0].d.body, peers[1].d.body);
+    assert_eq!(cell_text(&peers[0].d, 0, 0), "theirs ");
+}
+
+#[test]
+fn a_caret_in_a_cell_follows_text_and_new_rows() {
+    let mut peers = session(2);
+    let a = peers[0].edit(|d| type_in_cell(d, 1, 0, 0, "abc"));
+    peers[1].receive(&a);
+    let caret = Pos::new(StoryRef::Body, Path(vec![2, 1, 0, 0]), 2);
+    let anchors = peers[1].c.anchors(&peers[1].d, &[&caret]);
+    assert!(anchors[0].is_some());
+    let a1 = peers[0].edit(|d| type_in_cell(d, 1, 0, 0, "xy"));
+    peers[1].receive(&a1);
+    let a = peers[0].edit(|d| {
+        let t = table_mut(d);
+        let row = t.rows[0].clone();
+        t.rows.insert(0, row);
+    });
+    peers[1].receive(&a);
+    let d = peers[1].d.clone();
+    assert_eq!(peers[1].c.positions(&d, &anchors), vec![Some(Pos::new(StoryRef::Body, Path(vec![2, 2, 0, 0]), 4))]);
+}
+
+#[test]
+fn spaces_typed_next_to_spaces_land_where_typed() {
+    let mut peers = session(2);
+    let a = peers[0].edit(|d| type_at(d, 1, 6, " "));
+    peers[1].receive(&a);
+    assert_eq!(texts(&peers[1].d)[1], "Second  one.");
+    // Both type a space at the double space at once, then a letter after it.
+    peers[0].c.set_caret(Some(Pos::new(StoryRef::Body, Path::top(1), 8)));
+    let a = peers[0].edit(|d| type_at(d, 1, 7, " A"));
+    peers[1].c.set_caret(Some(Pos::new(StoryRef::Body, Path::top(1), 7)));
+    let b = peers[1].edit(|d| type_at(d, 1, 6, " B"));
+    peers[0].receive(&b);
+    peers[1].receive(&a);
+    assert_eq!(peers[0].d.body, peers[1].d.body);
+    // Each lands exactly where it was typed: B before the first space, A between the two.
+    assert_eq!(texts(&peers[0].d)[1], "Second B  A one.");
+    // Backspace over one of two spaces removes the one before the caret.
+    peers[0].c.set_caret(Some(Pos::new(StoryRef::Body, Path::top(1), 6)));
+    let a = peers[0].edit(|d| {
+        if let Some(Block::Para(p)) = d.body.get_mut(1).map(Arc::make_mut) {
+            p.text.remove(6);
+            p.runs[0].len -= 1;
+        }
+    });
+    peers[1].receive(&a);
+    assert_eq!(peers[0].d.body, peers[1].d.body);
+}
+
+#[test]
+fn ids_from_others_in_cells_never_clash() {
+    let mut peers = session(3);
+    let a = peers[0].edit(|d| d.body.push(Arc::new(Block::Table(wordcraft_doc::table::Table::new(1, 1, 50.0)))));
+    let b = peers[1].edit(|d| d.body.push(Arc::new(Block::Table(wordcraft_doc::table::Table::new(1, 1, 50.0)))));
+    for p in [0, 2] {
+        peers[p].receive(&b);
+    }
+    for p in [1, 2] {
+        peers[p].receive(&a);
+    }
+    assert_eq!(peers[0].d.body, peers[1].d.body);
+    assert_eq!(peers[2].d.body, peers[1].d.body);
+    assert_eq!(peers[0].d.body.iter().filter(|b| b.as_table().is_some()).count(), 3);
+}

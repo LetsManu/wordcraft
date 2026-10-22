@@ -15,10 +15,25 @@ use crate::session::Session;
 
 pub use wordcraft_collab::merge;
 
+/// Ids people give new parts, comments and images while editing together start here, one
+/// range of [`ID_SPAN`] per person, so nobody picks an id someone else picked at the same time.
+const ID_BASE: u32 = 0x0100_0000;
+const ID_SPAN: u32 = 0x1_0000;
+
+/// The ids this participant gives out (see [`wordcraft_doc::Document::id_range`]).
+fn id_range(client: u64) -> (u32, u32) {
+    let slots = (u32::MAX - ID_BASE) / ID_SPAN;
+    let slot = (client % u64::from(slots)) as u32;
+    let start = ID_BASE + slot * ID_SPAN;
+    (start, start + ID_SPAN)
+}
+
 /// The document's co-editing state. A copy of a session does not take part.
 #[derive(Default)]
 pub struct Shared {
     pub(crate) collab: Option<Box<Collab>>,
+    /// The ids this participant gives out.
+    pub(crate) ids: Option<(u32, u32)>,
     /// Updates made by commands (undo, finished steps) waiting for the host to send them.
     pub(crate) outbox: Vec<Vec<u8>>,
     /// The session revision the shared document last saw.
@@ -100,6 +115,7 @@ impl Session {
     /// Show the shared document, keeping the selection where the text around it moved to.
     fn adopt_shared(&mut self, d: Arc<Document>) {
         self.doc = Arc::unwrap_or_clone(d);
+        self.doc.id_range = self.shared.ids;
         self.doc.ensure_nonempty();
         self.touch();
         self.shared.synced_rev = self.rev();
@@ -114,7 +130,8 @@ impl Session {
         c.local(&Arc::new(self.doc.clone()));
         c.step();
         self.reset_history();
-        self.shared = Shared { collab: Some(c), outbox: Vec::new(), synced_rev: self.rev() };
+        self.doc.id_range = Some(id_range(client));
+        self.shared = Shared { collab: Some(c), ids: Some(id_range(client)), outbox: Vec::new(), synced_rev: self.rev() };
         update
     }
 
@@ -123,12 +140,14 @@ impl Session {
         let mut c = Box::new(Collab::new(client));
         let d = c.join(updates).map_err(|e| e.to_string())?;
         self.set_document(d);
-        self.shared = Shared { collab: Some(c), outbox: Vec::new(), synced_rev: self.rev() };
+        self.doc.id_range = Some(id_range(client));
+        self.shared = Shared { collab: Some(c), ids: Some(id_range(client)), outbox: Vec::new(), synced_rev: self.rev() };
         Ok(())
     }
 
     pub fn collab_leave(&mut self) {
         self.shared = Shared::default();
+        self.doc.id_range = None;
     }
 
     /// What to send to the others now, if anything. Call it every frame.
@@ -218,6 +237,59 @@ mod tests {
         b.run("text.insert", &json!({"text": " and friends"})).unwrap();
         sync(&mut b, &mut a);
         assert!(a.doc.plain_text(wordcraft_doc::StoryRef::Body).contains("makers and friends"));
+    }
+
+    #[test]
+    fn comments_added_at_once_keep_their_own_ids() {
+        let (mut a, mut b) = two();
+        a.run("select.text", &json!({"text": "Every Thursday"})).unwrap();
+        b.run("select.text", &json!({"text": "people who make things"})).unwrap();
+        let ia = a.run("review.newComment", &json!({"text": "from A"})).unwrap()["id"].as_u64().unwrap();
+        let ib = b.run("review.newComment", &json!({"text": "from B"})).unwrap()["id"].as_u64().unwrap();
+        assert_ne!(ia, ib);
+        sync(&mut a, &mut b);
+        sync(&mut b, &mut a);
+        sync(&mut a, &mut b);
+        assert_eq!(a.doc.comments, b.doc.comments);
+        assert_eq!(a.doc.parts, b.doc.parts);
+        assert_eq!(a.doc.comments.len(), 2);
+        let texts: Vec<String> = a.doc.comments.values().map(|c| a.doc.plain_text(wordcraft_doc::StoryRef::Part(c.part))).collect();
+        assert!(texts.iter().any(|t| t.contains("from A")) && texts.iter().any(|t| t.contains("from B")), "{texts:?}");
+    }
+
+    #[test]
+    fn typing_together_in_a_table_cell() {
+        let mut a = Session::new(Document::new());
+        a.run("insert.table", &json!({"rows": 2, "cols": 2})).unwrap();
+        let seed = a.collab_seed(21);
+        let mut b = Session::new(Document::new());
+        b.collab_join(22, &[seed]).unwrap();
+        a.run("text.insert", &json!({"text": "Name"})).unwrap();
+        sync(&mut a, &mut b);
+        let path = a.sel.focus.path.clone();
+        assert_eq!(path.0.len(), 4, "{path:?}");
+        b.sel = crate::session::Selection::caret(wordcraft_doc::Pos::new(wordcraft_doc::StoryRef::Body, path.clone(), 0));
+        b.run("text.insert", &json!({"text": "Full "})).unwrap();
+        a.run("text.insert", &json!({"text": "s"})).unwrap();
+        sync(&mut a, &mut b);
+        sync(&mut b, &mut a);
+        sync(&mut a, &mut b);
+        assert_eq!(a.doc.body, b.doc.body);
+        let (t, r, c) = path.cell().unwrap();
+        let cell = &a.doc.body[t.last()].as_table().unwrap().rows[r].cells[c];
+        assert_eq!(cell.blocks[0].as_para().unwrap().text, "Full Names");
+        // A's caret stayed after what A typed.
+        assert_eq!(a.sel.focus.off, "Full Names".len());
+        // A new row from A while B types in the first cell: both stay.
+        a.run("table.insertRowBelow", &json!({})).unwrap();
+        b.run("text.insert", &json!({"text": "!"})).unwrap();
+        sync(&mut a, &mut b);
+        sync(&mut b, &mut a);
+        sync(&mut a, &mut b);
+        assert_eq!(a.doc.body, b.doc.body);
+        let table = a.doc.body[t.last()].as_table().unwrap();
+        assert_eq!(table.rows.len(), 3);
+        assert_eq!(table.rows[r].cells[c].blocks[0].as_para().unwrap().text, "Full !Names");
     }
 
     #[test]
