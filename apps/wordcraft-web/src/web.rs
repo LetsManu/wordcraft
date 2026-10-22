@@ -130,10 +130,7 @@ struct WebShell {
 /// off. Keep the canvas at its size in device pixels (a pixel or two of rounding is left alone).
 fn fit_canvas(ctx: &egui::Context) {
     let Some(window) = web_sys::window() else { return };
-    let Some(canvas) = window
-        .document()
-        .and_then(|d| d.get_element_by_id(CANVAS_ID))
-        .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+    let Some(canvas) = window.document().and_then(|d| d.get_element_by_id(CANVAS_ID)).and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
     else {
         return;
     };

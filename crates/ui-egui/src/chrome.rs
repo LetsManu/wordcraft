@@ -443,6 +443,7 @@ pub fn status_bar(app: &mut WordApp, ui: &mut Ui) {
                 return;
             }
             ui.horizontal_centered(|ui| {
+                let narrow = ui.max_rect().width() < 700.0;
                 ui.spacing_mut().item_spacing = vec2(14.0, 0.0);
                 let l = app.session.layout();
                 let page = if app.session.selects_whole_story() {
@@ -465,60 +466,63 @@ pub fn status_bar(app: &mut WordApp, ui: &mut Ui) {
                 {
                     let _ = app.run("ui.dialog", json!({"name": "goto"}));
                 }
-                let words = app.cached_word_count();
-                // A selected picture/shape/text box isn't a text selection: show the total.
-                let wtxt = if app.session.sel.is_collapsed() || crate::objects::selected(app).is_some() {
-                    crate::i18n::fmt(tl!("{words} words"), &[("words", &words.to_string())])
-                } else {
-                    let sw = wordcraft_doc::count_words(&app.session.selected_text());
-                    crate::i18n::fmt(tl!("{selected} of {words} words"), &[("selected", &sw.to_string()), ("words", &words.to_string())])
-                };
-                if st(ui, &wtxt).clicked() {
-                    let _ = app.run("ui.dialog", json!({"name": "wordCount"}));
-                }
-                if app.session.sel.focus.story != StoryRef::Body && !crate::canvas::in_text_box(app) {
-                    st(ui, tl!("Editing header/footer"));
-                }
-                // The language at the caret; a click sets the proofing language (Review › Language).
-                let lang = crate::ribbon::caret_language(app);
-                let missing = crate::ribbon::caret_missing_dictionary(app);
-                let unreadable = crate::ribbon::caret_unreadable_dictionary(app);
-                let shown = if unreadable.is_some() {
-                    crate::i18n::fmt(tl!("{language} (dictionary unreadable)"), &[("language", &lang)])
-                } else if missing.is_some() {
-                    crate::i18n::fmt(tl!("{language} (no dictionary)"), &[("language", &lang)])
-                } else {
-                    lang.clone()
-                };
-                let tip = match (&unreadable, missing) {
-                    (Some((file, reason)), _) => crate::i18n::fmt(
-                        tl!("The spelling dictionary for {language} couldn't be read, so it isn't checked. File: {file}. Reason: {reason}"),
-                        &[("language", &lang), ("file", &file.to_string_lossy()), ("reason", reason)],
-                    ),
-                    (None, Some(name)) => crate::i18n::fmt(
-                        tl!("No spelling dictionary for {language} is installed, so it isn't checked. WordCraft looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations."),
-                        &[("language", &lang), ("name", name)],
-                    ),
-                    (None, None) => tl!("Language").to_string(),
-                };
-                let resp = st(ui, &shown).on_hover_text(tip);
-                egui::Popup::menu(&resp).show(|ui| {
-                    ui.set_min_width(200.0);
-                    crate::ribbon::language_menu(ui, app);
-                });
-                if app.session.doc.settings.track_changes {
-                    st(ui, tl!("Track Changes: On"));
-                }
-                if app.session.prefs.overtype && st(ui, tl!("Overtype")).on_hover_text(tl!("Click to switch back to inserting")).clicked() {
-                    let _ = app.run("text.overtype", json!({"value": false}));
-                }
-                if let Some((msg, at)) = &app.status_msg
-                    && crate::now_ms() - at < 6000.0
-                {
-                    let font = TypeRung::Caption.regular();
-                    let track = TypeRung::Caption.tracking();
-                    paint_text(ui.painter(), pos2(ui.cursor().min.x, ui.cursor().min.y), Align2::LEFT_TOP, msg, &font, track, t.accent_text);
-                    ui.allocate_space(vec2(text_width(ui.painter(), msg, &font, track, t.accent_text) + 1.0, TypeRung::Caption.line_height()));
+                // A phone: only the page, the zoom and its buttons; the rest would overlap.
+                if !narrow {
+                    let words = app.cached_word_count();
+                    // A selected picture/shape/text box isn't a text selection: show the total.
+                    let wtxt = if app.session.sel.is_collapsed() || crate::objects::selected(app).is_some() {
+                        crate::i18n::fmt(tl!("{words} words"), &[("words", &words.to_string())])
+                    } else {
+                        let sw = wordcraft_doc::count_words(&app.session.selected_text());
+                        crate::i18n::fmt(tl!("{selected} of {words} words"), &[("selected", &sw.to_string()), ("words", &words.to_string())])
+                    };
+                    if st(ui, &wtxt).clicked() {
+                        let _ = app.run("ui.dialog", json!({"name": "wordCount"}));
+                    }
+                    if app.session.sel.focus.story != StoryRef::Body && !crate::canvas::in_text_box(app) {
+                        st(ui, tl!("Editing header/footer"));
+                    }
+                    // The language at the caret; a click sets the proofing language (Review › Language).
+                    let lang = crate::ribbon::caret_language(app);
+                    let missing = crate::ribbon::caret_missing_dictionary(app);
+                    let unreadable = crate::ribbon::caret_unreadable_dictionary(app);
+                    let shown = if unreadable.is_some() {
+                        crate::i18n::fmt(tl!("{language} (dictionary unreadable)"), &[("language", &lang)])
+                    } else if missing.is_some() {
+                        crate::i18n::fmt(tl!("{language} (no dictionary)"), &[("language", &lang)])
+                    } else {
+                        lang.clone()
+                    };
+                    let tip = match (&unreadable, missing) {
+                        (Some((file, reason)), _) => crate::i18n::fmt(
+                            tl!("The spelling dictionary for {language} couldn't be read, so it isn't checked. File: {file}. Reason: {reason}"),
+                            &[("language", &lang), ("file", &file.to_string_lossy()), ("reason", reason)],
+                        ),
+                        (None, Some(name)) => crate::i18n::fmt(
+                            tl!("No spelling dictionary for {language} is installed, so it isn't checked. WordCraft looks for the Hunspell dictionary {name} in the WORDCRAFT_DICTIONARIES folder and in the usual system locations."),
+                            &[("language", &lang), ("name", name)],
+                        ),
+                        (None, None) => tl!("Language").to_string(),
+                    };
+                    let resp = st(ui, &shown).on_hover_text(tip);
+                    egui::Popup::menu(&resp).show(|ui| {
+                        ui.set_min_width(200.0);
+                        crate::ribbon::language_menu(ui, app);
+                    });
+                    if app.session.doc.settings.track_changes {
+                        st(ui, tl!("Track Changes: On"));
+                    }
+                    if app.session.prefs.overtype && st(ui, tl!("Overtype")).on_hover_text(tl!("Click to switch back to inserting")).clicked() {
+                        let _ = app.run("text.overtype", json!({"value": false}));
+                    }
+                    if let Some((msg, at)) = &app.status_msg
+                        && crate::now_ms() - at < 6000.0
+                    {
+                        let font = TypeRung::Caption.regular();
+                        let track = TypeRung::Caption.tracking();
+                        paint_text(ui.painter(), pos2(ui.cursor().min.x, ui.cursor().min.y), Align2::LEFT_TOP, msg, &font, track, t.accent_text);
+                        ui.allocate_space(vec2(text_width(ui.painter(), msg, &font, track, t.accent_text) + 1.0, TypeRung::Caption.line_height()));
+                    }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
@@ -542,6 +546,9 @@ pub fn status_bar(app: &mut WordApp, ui: &mut Ui) {
                         } else {
                             let _ = app.run("view.zoomIn", json!({}));
                         }
+                    }
+                    if narrow {
+                        return;
                     }
                     // Reading zoom changes only reading presentation, never the normal view zoom.
                     let mut v = if reading { app.session.view.read_zoom } else { app.canvas.scale / crate::canvas::PX_PER_PT };
