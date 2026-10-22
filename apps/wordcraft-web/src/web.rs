@@ -95,7 +95,7 @@ pub fn start() {
                         app.start_screen();
                     }
                     let live = crate::live::Live::from_portal(&app);
-                    Ok(Box::new(WebShell { app, inbox, messages, prefs, live }))
+                    Ok(Box::new(WebShell { app, inbox, messages, prefs, live, sized: false }))
                 }),
             )
             .await;
@@ -121,7 +121,34 @@ struct WebShell {
     prefs: crate::prefs::PrefsSync,
     /// OfficeHub: editing together with others (`?collab=`).
     live: Option<crate::live::Live>,
+    /// The zoom was fitted to a narrow screen (a phone) once.
+    sized: bool,
 }
+
+/// eframe can leave the canvas at its size in CSS pixels on screens with more than one pixel per
+/// point (phones, Retina displays): the interface is then drawn several times too large and cut
+/// off. Keep the canvas at its size in device pixels (a pixel or two of rounding is left alone).
+fn fit_canvas(ctx: &egui::Context) {
+    let Some(window) = web_sys::window() else { return };
+    let Some(canvas) = window
+        .document()
+        .and_then(|d| d.get_element_by_id(CANVAS_ID))
+        .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+    else {
+        return;
+    };
+    let dpr = window.device_pixel_ratio();
+    let want = |css: i32| (f64::from(css.max(0)) * dpr).round() as u32;
+    let (w, h) = (want(canvas.client_width()), want(canvas.client_height()));
+    if w > 0 && h > 0 && (canvas.width().abs_diff(w) > 2 || canvas.height().abs_diff(h) > 2) {
+        canvas.set_width(w);
+        canvas.set_height(h);
+        ctx.request_repaint();
+    }
+}
+
+/// Screens narrower than this (in points) are phones: the page is fitted to their width.
+const NARROW: f32 = 700.0;
 
 fn local_storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok()?
@@ -134,6 +161,15 @@ fn stored_prefs() -> Option<String> {
 
 impl eframe::App for WebShell {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        fit_canvas(ctx);
+        if !self.sized && ctx.content_rect().width() > 1.0 {
+            self.sized = true;
+            if ctx.content_rect().width() < NARROW
+                && let Err(e) = self.app.run("view.zoom", serde_json::json!({"value": "pageWidth"}))
+            {
+                log::warn!("narrow screen: {e}");
+            }
+        }
         let dropped = ctx.input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
         for f in dropped {
             let inbox = self.inbox.clone();
