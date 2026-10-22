@@ -121,7 +121,7 @@ struct WebShell {
     prefs: crate::prefs::PrefsSync,
     /// OfficeHub: editing together with others (`?collab=`).
     live: Option<crate::live::Live>,
-    /// The zoom was fitted to a narrow screen (a phone) once.
+    /// The view was fitted to a narrow screen (a phone) once.
     sized: bool,
 }
 
@@ -147,7 +147,7 @@ fn fit_canvas(ctx: &egui::Context) {
     }
 }
 
-/// Screens narrower than this (in points) are phones: the page is fitted to their width.
+/// Screens narrower than this (in points) are phones.
 const NARROW: f32 = 700.0;
 
 fn local_storage() -> Option<web_sys::Storage> {
@@ -164,10 +164,14 @@ impl eframe::App for WebShell {
         fit_canvas(ctx);
         if !self.sized && ctx.content_rect().width() > 1.0 {
             self.sized = true;
-            if ctx.content_rect().width() < NARROW
-                && let Err(e) = self.app.run("view.zoom", serde_json::json!({"value": "pageWidth"}))
-            {
-                log::warn!("narrow screen: {e}");
+            if ctx.content_rect().width() < NARROW {
+                // Like Word on a phone: the text flows to the screen's width (Web Layout, for this
+                // visit only), with the ribbon folded and no ruler.
+                self.app.ui.ribbon_collapsed = true;
+                self.app.session.view.ruler = false;
+                if let Err(e) = self.app.run("view.webLayout", serde_json::json!({})) {
+                    log::warn!("narrow screen: {e}");
+                }
             }
         }
         let dropped = ctx.input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
