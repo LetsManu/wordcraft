@@ -161,6 +161,8 @@ impl eframe::App for WebShell {
         fit_canvas(ctx);
         if !self.sized && ctx.content_rect().width() > 1.0 {
             self.sized = true;
+            // Inside OfficeHub: no community button in the title bar.
+            self.app.ui.show_discord = false;
             if ctx.content_rect().width() < NARROW {
                 // Like Word on a phone: the text flows to the screen's width (Web Layout, for this
                 // visit only), with the ribbon folded and no ruler.
